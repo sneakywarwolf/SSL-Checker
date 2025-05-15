@@ -2,9 +2,9 @@ import requests
 import time
 import re
 import os
-from PIL import ImageGrab  # For taking screenshots
+from PIL import ImageGrab
+import pyautogui
 from termcolor import colored
-
 
 def validate_domain(domain):
     """
@@ -15,7 +15,6 @@ def validate_domain(domain):
         return True
     return False
 
-
 def fetch_ssl_data(domain):
     """
     Fetch SSL/TLS details using the SSL Labs API.
@@ -23,7 +22,7 @@ def fetch_ssl_data(domain):
     base_url = "https://api.ssllabs.com/api/v3/analyze"
     params = {"host": domain, "all": "done"}
     print(f"Initiating SSL analysis for: {domain}")
-    
+
     response = requests.get(base_url, params=params)
     if response.status_code != 200:
         print("Error: Unable to connect to SSL Labs API.")
@@ -42,17 +41,18 @@ def fetch_ssl_data(domain):
 
     return data
 
-
 def colorize(text, color):
     """
-    Colorize the given text based on the specified color using termcolor.
+    Colorize the given text based on the specified color.
     """
     colors = {
-        "red": "red",     # Red for deprecated or outdated
-        "green": "green", # Green for strong
-        "orange": "yellow"  # Termcolor does not support orange directly, use yellow
+        "red": "\033[31m",  # Red for deprecated or outdated
+        "green": "\033[32m",  # Green for strong
+        "orange": "\033[38;5;214m",  # Orange for weak
+        "yellow": "\033[33m",  # Yellow for unknown
+        "reset": "\033[0m"  # Reset to default
     }
-    return colored(text, colors.get(color, "white"))  # Default to white
+    return f"{colors.get(color, colors['reset'])}{text}{colors['reset']}"
 
 def parse_ssl_results(data):
     """
@@ -69,24 +69,17 @@ def parse_ssl_results(data):
 
         details = endpoint.get("details", {})
         if details:
-            # Parse protocols with color coding and labels
+            # Parse protocols with annotations
             for protocol in details.get("protocols", []):
                 name = protocol.get("name", "Unknown")
                 version = protocol.get("version", "Unknown")
                 protocol_string = f"{name} {version}"
-
                 if name == "SSLv3" or version in ["TLS 1.0", "TLS 1.1"]:
-                    # Deprecated protocols
-                    labeled_protocol = f"{protocol_string} - Deprecated"
-                    endpoint_results["protocols"].append(colorize(labeled_protocol, "red"))
+                    endpoint_results["protocols"].append(f"{protocol_string} - Deprecated")
                 elif version in ["TLS 1.2", "TLS 1.3"]:
-                    # Secure protocols
-                    labeled_protocol = f"{protocol_string} - Secure"
-                    endpoint_results["protocols"].append(colorize(labeled_protocol, "green"))
+                    endpoint_results["protocols"].append(f"{protocol_string} - Secure")
                 else:
-                    # Unknown or insecure protocols
-                    labeled_protocol = f"{protocol_string} - Insecure"
-                    endpoint_results["protocols"].append(colorize(labeled_protocol, "yellow"))
+                    endpoint_results["protocols"].append(f"{protocol_string} - Unknown")
 
             # Parse cipher suites with color coding
             suites = details.get("suites", [])
@@ -97,20 +90,16 @@ def parse_ssl_results(data):
                         strength = cipher.get('cipherStrength', 0)
                         cipher_string = f"{name} (Strength: {strength})"
                         if strength < 128:
-                            # Weak ciphers
                             endpoint_results["cipherSuites"].append(colorize(cipher_string, "orange"))
                         elif strength >= 128:
-                            # Strong ciphers
                             endpoint_results["cipherSuites"].append(colorize(cipher_string, "green"))
                         else:
-                            # Unknown cipher strength
                             endpoint_results["cipherSuites"].append(cipher_string)
             else:
                 print(f"No cipher suites found for {endpoint.get('ipAddress')}")
 
         results.append(endpoint_results)
     return results
-
 
 def display_results(parsed_results):
     """
@@ -123,14 +112,12 @@ def display_results(parsed_results):
         # Display protocols
         print("\nSupported Protocols:")
         for protocol in endpoint["protocols"]:
-            print(f"- {protocol}")  # Directly print the colorized protocol strings
+            print(f"- {protocol}")
 
         # Display cipher suites
         print("\nCipher Suites:")
         for suite in endpoint["cipherSuites"]:
-            print(f"- {suite}")  # Directly print the colorized cipher suite strings
-
-
+            print(f"- {suite}")
 
 def create_folder(domain):
     """
@@ -141,23 +128,42 @@ def create_folder(domain):
         os.makedirs(folder_path)
     return folder_path
 
-
-def take_screenshot(folder_path, filename="screenshot.png"):
+def take_screenshot(folder_path, filename_prefix="screenshot", width=800, height=600):
     """
-    Capture a screenshot and save it to the specified folder.
+    Capture terminal screenshots in a defined width and height, scrolling as needed.
     """
-    screenshot_path = os.path.join(folder_path, filename)
-    screenshot = ImageGrab.grab()  # Capture the screen
-    screenshot.save(screenshot_path)
-    print(f"Screenshot saved to {screenshot_path}")
+    screenshot_count = 0
+    full_screen_height = pyautogui.size().height
 
+    print("Please focus on the terminal window within 5 seconds...")
+    time.sleep(5)
+
+    while True:
+        left, top = 0, 0
+        region = (left, top, width, height)
+
+        # Take the screenshot
+        screenshot_path = os.path.join(folder_path, f"{filename_prefix}_{screenshot_count}.png")
+        screenshot = pyautogui.screenshot(region=region)
+        screenshot.save(screenshot_path)
+        print(f"Screenshot saved to {screenshot_path}")
+        screenshot_count += 1
+
+        # Scroll down
+        pyautogui.scroll(-full_screen_height // 2)
+        time.sleep(1)
+
+        # Check if scrolling is complete
+        if pyautogui.pixelMatchesColor(left + 10, top + height - 10, (0, 0, 0)):
+            print("Reached the end of the terminal output.")
+            break
 
 def save_results_to_file(results, domain, folder_path, filename=None):
     """
     Save the parsed results to a text file inside the specified folder.
     """
     if not filename:
-        filename = f"{domain}_ssl_results.txt"  # Default file name based on domain
+        filename = f"{domain}_ssl_results.txt"
     file_path = os.path.join(folder_path, filename)
 
     with open(file_path, "w") as file:
@@ -165,45 +171,36 @@ def save_results_to_file(results, domain, folder_path, filename=None):
             file.write(f"Results for IP: {endpoint['ipAddress']}\n")
             file.write(f"Status: {endpoint['statusMessage']}\n")
 
-            # Write protocols
             file.write("\nSupported Protocols:\n")
             for protocol in endpoint["protocols"]:
                 file.write(f"- {protocol}\n")
 
-            # Write cipher suites
             file.write("\nCipher Suites:\n")
             for suite in endpoint["cipherSuites"]:
                 file.write(f"- {suite}\n")
-            file.write("\n")  # Add a newline after each endpoint
+            file.write("\n")
 
     print(f"Results saved to {file_path}")
-
+    return file_path
 
 def main():
-    
     domain = input("Enter the domain name (e.g., example.com): ")
-    
+
     if not validate_domain(domain):
         print("Error: Invalid domain format. Please try again.")
         return
 
-    # Create folder for results and screenshots
     folder_path = create_folder(domain)
-    
-    # Fetch SSL data from SSL Labs API
     ssl_data = fetch_ssl_data(domain)
-    
+
     if ssl_data:
-        # Parse and display results
         parsed_results = parse_ssl_results(ssl_data)
         display_results(parsed_results)
 
-        # Save results to the domain-specific folder
-        save_results_to_file(parsed_results, domain, folder_path)
+        file_path = save_results_to_file(parsed_results, domain, folder_path)
 
-        # Capture a screenshot of the terminal output
-        take_screenshot(folder_path)
-
+        # Take terminal screenshots
+        take_screenshot(folder_path, filename_prefix=f"{domain}_terminal_screenshot")
 
 if __name__ == "__main__":
     main()
